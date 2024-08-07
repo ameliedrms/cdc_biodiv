@@ -1,0 +1,234 @@
+---
+title: "CDC Biodiversité - Test écrit"
+author: "Amélie Darmais"
+date: '2024-08-06'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r config, include = FALSE}
+required_packages <- c("dplyr", "ggplot2", "readr", "readxl", "tidyr", "here")
+install_if_missing <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[, "Package"])]
+  if (length(new_packages) > 0) {
+    install.packages(new_packages)
+  }
+}
+install_if_missing(required_packages)
+
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(readxl)
+library(stringr)
+library(here)
+
+here::i_am("cdc_biodiv.Rmd")
+
+fao_data_path <- here("data", "FAOSTAT.xls")
+corres_table_path <- here("data", "country_specs.xlsx")
+impact_factors_path <- here("data", "crops.csv")
+```
+
+
+## Computing the biodiversity loss 
+
+First, we load our data and format it to create a dataframe containing all relevant data. To do so, we select the data related to wheat production, and the impact factors related to land use. 
+The impact factors that we keep are : land use change, fragmentation, encroachment, wetland conversion, land use in catchment of river, and land use in catchment of wetland. 
+For the last two, there are two different impact factors available: a "weighted-mean" and a "cut-off" impact factor. For now, we will keep both in our dataframe.   
+
+```{r - Loading data}
+fao_data <- read_xls(fao_data_path, sheet = 1)
+corres_table <- read_xlsx(corres_table_path, sheet = 1)
+impact_factors <- read.csv(impact_factors_path)
+```
+
+```{r - Creating an impact_wheat dataframe containing all data needed for the computation} 
+impact_wheat <- impact_factors %>% filter(item_name=="Wheat")
+
+fao_data_t <- fao_data %>% filter(Unit=="t")
+
+impact_wheat <- impact_wheat %>%
+  mutate(globio_country_code = str_pad(globio_country_code, width = 3, pad = "0")) %>%
+  left_join(., fao_data_t, by=c("globio_country_code"="FAO_country_code"))
+
+impact_wheat <- impact_wheat %>%
+  select(globio_country_code, country_name=Area, msa_land_use_static, msa_fragmentation_static, msa_encroachment_static, 
+         msa_aquatic_land_use_river_static_wm,msa_aquatic_land_use_river_static_cut, msa_aquatic_land_use_wetland_static_wm, 
+         msa_aquatic_land_use_wetland_static_cut, msa_aquatic_wetland_conversion_static, prod=Value) %>%
+  filter(prod>0)
+```
+
+We compute the impact of wheat production in each country for each type of pressure. To do so, for each type of pressure related to land use, we multiply the relevant impact factor (in MSA.km² per ton) with the production (in tons). 
+
+We then compute the total biodiversity loss related to land use for wheat production by adding up the impacts that we just calculated. We compute two total biodiversity loss: one using the weighted-mean impact factors, the other using the cut-off impact factors. 
+
+```{r - Computing the impact for each type of pressure, as well as total biodiversity loss and total terrestrial/aquatic biodiversity loss}
+impact_wheat <- impact_wheat %>% 
+  mutate(biodiv_loss_landuse=msa_land_use_static*prod) %>%
+  mutate(biodiv_loss_fragmentation=msa_fragmentation_static*prod) %>%
+  mutate(biodiv_loss_encroachment=msa_encroachment_static*prod) %>%
+  mutate(biodiv_loss_catch_rivers_wm=msa_aquatic_land_use_river_static_wm*prod) %>%
+  mutate(biodiv_loss_catch_rivers_cut=msa_aquatic_land_use_river_static_cut*prod) %>%
+  mutate(biodiv_loss_catch_wet_wm=msa_aquatic_land_use_wetland_static_wm*prod) %>%
+  mutate(biodiv_loss_catch_wet_cut=msa_aquatic_land_use_wetland_static_cut*prod) %>%
+  mutate(biodiv_loss_wetconv=msa_aquatic_wetland_conversion_static*prod) %>%
+  mutate(biodiv_loss_total_wm=biodiv_loss_landuse+biodiv_loss_fragmentation+biodiv_loss_encroachment+biodiv_loss_catch_rivers_wm+
+           biodiv_loss_catch_wet_wm+biodiv_loss_wetconv) %>%
+  mutate(biodiv_loss_total_cut=biodiv_loss_landuse+biodiv_loss_fragmentation+biodiv_loss_encroachment+biodiv_loss_catch_rivers_cut+
+           biodiv_loss_catch_wet_cut+biodiv_loss_wetconv) %>%
+  mutate(biodiv_loss_aquatic=biodiv_loss_catch_rivers_wm+biodiv_loss_catch_wet_wm+biodiv_loss_wetconv) %>%
+  mutate(biodiv_loss_terrestrial=biodiv_loss_landuse+biodiv_loss_fragmentation+biodiv_loss_encroachment)
+
+```
+
+This will allow us to investigate the difference between those two calculation methods. A simple Student test shows us that there is a statistically significant difference between the two global impacts that we computed. 
+
+```{r - Testing for the difference between the cut-off and weighted mean impact factors}
+test1 <- t.test(impact_wheat$biodiv_loss_total_cut, impact_wheat$biodiv_loss_total_wm, alternative = "two.sided", paired = TRUE)
+print(test1)
+```
+
+The weighted-mean impact factors correspond to a "central" calculation mode, which aggregates the basin-level intensities at the country level, weighted by the share of the area of human land uses related to each basin in the total area of human land uses in the country. 
+
+The cut-off impact factors are more pessimistic: they are also a weighted average of basin intensities, but only applied to the 20% of areas of human land uses with the highest intensities. 
+
+For our analysis, which is global and aims at investigating differences between countries, it seems more appropriate to use the weighted-mean impact factors, as they give a more neutral estimation.
+
+The table below shows the result of our computation and gives the terrestrial biodiversity loss, the aquatic biodiversity loss and the total loss, in MSA.km². We see that the aquatic biodiversity loss is way less important than the terrestrial, which was expected.  
+
+```{r - Printing the results in a table}
+table <- impact_wheat %>%
+  select("Globio country code" = globio_country_code, "Country name" = country_name, 
+         "Total static biodiversity loss in MSA.km²" = biodiv_loss_total_wm, 
+         "Terrestrial" = biodiv_loss_terrestrial, "Aquatic" = biodiv_loss_aquatic)
+knitr::kable(table, "pipe")
+```
+
+We can visualize those results in a barplot ranking countries based on their impact on biodiversity. 
+
+The graphs below represent the total static biodiversity loss due to land use cause by wheat in 2019 for each country. One graph shows the result with the cut-off impact factors, the other with the weighted-mean impact factors. 
+
+We can see that the ranking of the countries stays the same no matter the computation choice, which confirms our choice to use the central hypothesis. 
+
+```{r - Graphs of the results, fig.width=12, fig.height=8}
+graph_cut <- ggplot(impact_wheat, aes(x = reorder(country_name, biodiv_loss_total_cut), y = biodiv_loss_total_cut)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Country", y = "MSA.km²", title = "Static biodiversity loss due to land use caused by wheat (cut)") +
+  theme_minimal()
+print(graph_cut)
+
+graph_wm <- ggplot(impact_wheat, aes(x = reorder(country_name, biodiv_loss_total_wm), y = biodiv_loss_total_wm)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(x = "Country", y = "MSA.km²", title = "Static biodiversity loss due to land use caused by wheat (wm)") +
+  theme_minimal()
+print(graph_wm)
+```
+
+## Visualizing the results
+
+In the next graph, we investigate the relative importance of each type of terrestrial impact in the total terrestrial biodiversity loss for each country. We see that the "land use change" pressure is the most important for all countries. 
+
+```{r - More detailed graphs to explore the components - Terrestrial, fig.width=12, fig.height=8}
+long_terrestrial <- impact_wheat %>%
+  pivot_longer(cols = c(biodiv_loss_landuse, biodiv_loss_fragmentation, biodiv_loss_encroachment),
+               names_to = "biodiv_loss",
+               values_to = "Value")
+
+barplot_terrestrial <- ggplot(long_terrestrial, aes(x = reorder(country_name, biodiv_loss_total_wm), y = Value, fill = biodiv_loss)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Components of terrestrial biodiversity loss",
+       x = "Country",
+       y = "MSA.km²") +
+  theme_minimal() +
+  theme(legend.position = "top")
+print(barplot_terrestrial)
+```
+
+In this graph, we do the same for the aquatic biodiversity loss. We see a lot more differences in the relatives shares of the impacts in each country. In most countries though, biodiversity loss in catchment of wetland is the biggest factor of aquatic biodiversity loss. 
+
+```{r - Aquatic, fig.width=12, fig.height=8}
+long_aquatic <- impact_wheat %>%
+  pivot_longer(cols = c(biodiv_loss_catch_rivers_wm, biodiv_loss_catch_wet_wm, biodiv_loss_wetconv),
+               names_to = "biodiv_loss",
+               values_to = "Value")
+
+barplot_aquatic <- ggplot(long_aquatic, aes(x = reorder(country_name, biodiv_loss_total_wm), y = Value, fill = biodiv_loss)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Components of aquatic biodiversity loss",
+       x = "Country",
+       y = "MSA.km²") +
+  theme_minimal() +
+  theme(legend.position = "top")
+print(barplot_aquatic)
+```
+
+The next graph shows the share of each pressure in the total biodiversity loss. It confirms the difference in magnitude between the aquatic and terrestrial biodiversity losses. It also confirms that "land use change" pressure is by far the most important in every country in the biodiversity impact of wheat production. 
+
+```{r - Total, fig.width=12, fig.height=8}
+long <- impact_wheat %>%
+  pivot_longer(cols = c(biodiv_loss_landuse, biodiv_loss_fragmentation, biodiv_loss_encroachment, biodiv_loss_catch_rivers_wm, biodiv_loss_catch_wet_wm, biodiv_loss_wetconv),
+               names_to = "biodiv_loss",
+               values_to = "Value")
+
+barplot_total <- ggplot(long, aes(x = reorder(country_name, biodiv_loss_total_wm), y = Value, fill = biodiv_loss)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Components of total biodiversity loss",
+       x = "Country",
+       y = "MSA.km²") +
+  theme_minimal() +
+  theme(legend.position = "top")
+print(barplot_total)
+```
+
+## Exploring potential drivers of the differences accross countries
+
+In this section, we investigate the potential drivers of the differences of impact across countries. 
+
+First, in the next graph, we investigate the impact factors in each country. The graph shows huge differences between countries in the relative importance of the different kinds of pressure, but also in the magnitude of the impact factors. 
+
+The countries are still ordered based on the total biodiversity loss due to wheat production. We see that the magnitude of the impact factors does not explain at all the differences in biodiversity loss across countries. If we take the example of France or Germany, the magnitude of their impact factors is among the lowest across countries, whereas they are the two countries with the biggest impact of wheat production on biodiversity. The only country for which the impact factor seems to explain its ranking is Spain, whose impact factors are quite high. 
+
+```{r - Impact factors, fig.width=12, fig.height=8}
+long_factors <- impact_wheat %>% 
+  pivot_longer(cols = c(msa_land_use_static, msa_fragmentation_static, msa_encroachment_static, msa_aquatic_land_use_river_static_wm,
+                        msa_aquatic_land_use_wetland_static_wm, msa_aquatic_wetland_conversion_static),
+               names_to = "impact_factors",
+               values_to = "Value")
+
+barplot_factors <- ggplot(long_factors, aes(x = reorder(country_name, biodiv_loss_total_wm), y = Value, fill = impact_factors)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Impact factors",
+       x = "Country",
+       y = "MSA.km²/t") +
+  theme_minimal() +
+  theme(legend.position = "top")
+print(barplot_factors) 
+```
+
+Our next graph investigates wheat production in each country. As expected, we see a clear link between the magnitude of the production and the ranking of countries (again based on the total biodiversity loss due to wheat production).
+
+The magnitude of production seems to be the main driver of the global impact, which is quite logical: France and Germany may have quite low impact factors, their wheat production is huge, so its global impact on biodiversity ends up being high. On the contrary, Spain, which does not have much wheat production, has quite high impact factors, leading the country to be ranked third regarding biodiversity loss.
+
+```{r - Production, fig.width=12, fig.height=8}
+barplot_prod <- ggplot(impact_wheat, aes(x= reorder(country_name, biodiv_loss_total_wm), y = prod)) +
+  geom_bar(stat="identity") + 
+  coord_flip() + 
+  labs(title= "Wheat production in 2019",
+       x= "Country",
+       y= "Production in tons") + 
+  theme_minimal()
+print(barplot_prod)
+```
